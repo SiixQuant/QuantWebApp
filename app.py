@@ -10,6 +10,7 @@ from sklearn.linear_model import LinearRegression, Ridge, Lasso
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import r2_score, mean_squared_error
+import time
 
 # Configure Streamlit page settings
 st.set_page_config(
@@ -195,6 +196,24 @@ def format_futures_price(price, ticker):
 
 def main():
     st.title("Market Analysis Dashboard 📊")
+    
+    # Initialize session state for last update time if it doesn't exist
+    if 'last_update' not in st.session_state:
+        st.session_state.last_update = datetime.now()
+    
+    # Check if 1 minute has passed since last update
+    current_time = datetime.now()
+    if current_time - st.session_state.last_update >= timedelta(minutes=1):
+        st.session_state.last_update = current_time
+        st.experimental_rerun()
+    
+    # Display last update time
+    st.sidebar.text(f"Last updated: {st.session_state.last_update.strftime('%H:%M:%S')}")
+    
+    # Add a manual refresh button
+    if st.sidebar.button('Refresh Data'):
+        st.session_state.last_update = current_time
+        st.experimental_rerun()
     
     st.sidebar.header("Settings")
     months = st.sidebar.slider("Months of Historical Data", 1, 24, 6)
