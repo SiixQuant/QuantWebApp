@@ -7,6 +7,7 @@ import uuid
 from datetime import datetime, timedelta
 from requests_oauthlib import OAuth2Session
 from urllib.parse import quote
+from oauthlib.oauth2 import BackendApplicationClient
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -16,53 +17,70 @@ logger = logging.getLogger(__name__)
 SCHWAB_CONFIG = {
     'client_id': 'f6MOF1oqGHpQC6sZPCvTPRe7nyMWDgof',
     'client_secret': 'NCiMvAdTarXnDcIq',
-    'base_url': 'https://api.schwabapi.com/v1',
-    'token_url': 'https://api.schwabapi.com/v1/oauth/token',
-    'auth_url': 'https://api.schwabapi.com/v1/oauth/authorize',
+    'base_url': 'https://api.schwab.com/v1',
+    'token_url': 'https://api.schwab.com/v1/oauth2/token',
+    'auth_url': 'https://api.schwab.com/v1/oauth2/authorize',
     'redirect_uri': 'https://quantwebapp-bjbqck9aebxpadmg6h7pmk.streamlit.app/',
     'scope': ['trading', 'quotes', 'accounts', 'margin']
 }
 
 class SchwabAPI:
     def __init__(self):
-        self.session = requests.Session()
+        self.client = BackendApplicationClient(client_id=SCHWAB_CONFIG['client_id'])
+        self.oauth = OAuth2Session(client=self.client)
         self.token = None
         self.authenticate()
 
     def authenticate(self):
-        """Authenticate with Schwab API"""
+        """Authenticate with Schwab API using client credentials flow"""
         try:
-            data = {
-                'grant_type': 'client_credentials',
-                'client_id': SCHWAB_CONFIG['client_id'],
-                'client_secret': SCHWAB_CONFIG['client_secret']
-            }
+            # Encode credentials properly
+            auth = (SCHWAB_CONFIG['client_id'], SCHWAB_CONFIG['client_secret'])
             
-            response = self.session.post(
-                SCHWAB_CONFIG['token_url'],
-                data=data,
-                headers={'Accept': 'application/json'}
+            # Get token using client credentials grant
+            self.token = self.oauth.fetch_token(
+                token_url=SCHWAB_CONFIG['token_url'],
+                auth=auth,
+                client_id=SCHWAB_CONFIG['client_id'],
+                client_secret=SCHWAB_CONFIG['client_secret'],
+                include_client_id=True
             )
             
-            if response.status_code == 200:
-                self.token = response.json()
-                return True
-            else:
-                st.error(f"Authentication failed: {response.text}")
-                return False
-                
+            st.success("Successfully authenticated with Schwab API")
+            return True
+            
         except Exception as e:
+            st.error(f"Authentication failed: {str(e)}")
             logger.error(f"Authentication error: {str(e)}")
             return False
 
     def get_headers(self):
         """Get headers for API requests"""
+        if not self.token:
+            return None
+            
         return {
             'Authorization': f"Bearer {self.token['access_token']}",
             'Accept': 'application/json',
             'Content-Type': 'application/json',
-            'X-Request-ID': str(uuid.uuid4())
+            'X-Security-Token': self.token.get('access_token'),
+            'Client-Id': SCHWAB_CONFIG['client_id']
         }
+
+    def refresh_token_if_needed(self):
+        """Refresh token if expired"""
+        if self.token and self.oauth.token.is_expired():
+            try:
+                self.token = self.oauth.refresh_token(
+                    SCHWAB_CONFIG['token_url'],
+                    client_id=SCHWAB_CONFIG['client_id'],
+                    client_secret=SCHWAB_CONFIG['client_secret']
+                )
+                return True
+            except Exception as e:
+                logger.error(f"Token refresh error: {str(e)}")
+                return False
+        return True
 
     def get_market_data(self, symbols, fields=None):
         """Get real-time market data"""
@@ -179,51 +197,65 @@ def process_market_data(api, symbols, months):
 def main():
     st.title("Market Analysis Dashboard 📊")
     
-    # Initialize API
-    api = SchwabAPI()
-    if not api.token:
-        st.error("Failed to authenticate with Schwab API")
-        return
-        
-    # Sidebar settings
-    st.sidebar.header("Settings")
-    months = st.sidebar.slider("Months of Historical Data", 1, 24, 12)
-    
-    # Main content
-    tab1, tab2, tab3 = st.tabs(["Market Analysis", "Portfolio", "Options"])
-    
-    with tab1:
-        symbols = st.multiselect(
-            "Select Symbols",
-            ["AAPL", "MSFT", "GOOGL", "AMZN", "META"],
-            default=["AAPL", "MSFT"]
-        )
-        
-        if symbols:
-            data = process_market_data(api, symbols, months)
-            st.dataframe(data)
+    # Initialize API with proper error handling
+    try:
+        api = SchwabAPI()
+        if not api.token:
+            st.error("Failed to authenticate with Schwab API")
+            st.stop()
             
-            # Plot historical data
-            for symbol in symbols:
-                hist_data = api.get_historical_data(
-                    symbol,
-                    datetime.now() - timedelta(days=months*30)
-                )
-                if hist_data:
-                    df = pd.DataFrame(hist_data['candles'])
-                    st.line_chart(df.set_index('timestamp')['close'])
-    
-    with tab2:
-        positions = api.get_account_positions()
-        if positions:
-            st.dataframe(pd.DataFrame(positions['positions']))
-    
-    with tab3:
-        symbol = st.selectbox("Select Symbol for Options", symbols)
-        if symbol:
-            options = api.get_option_chain(symbol)
-            if options:
-                st.dataframe(pd.DataFrame(options['options']))
+        # Display authentication status
+        st.sidebar.markdown("### API Status")
+        st.sidebar.success("Connected to Schwab API")
+        
+        # Add logout button
+        if st.sidebar.button("Logout"):
+            api.token = None
+            st.experimental_rerun()
+            
+        # Sidebar settings
+        st.sidebar.header("Settings")
+        months = st.sidebar.slider("Months of Historical Data", 1, 24, 12)
+        
+        # Main content
+        tab1, tab2, tab3 = st.tabs(["Market Analysis", "Portfolio", "Options"])
+        
+        with tab1:
+            symbols = st.multiselect(
+                "Select Symbols",
+                ["AAPL", "MSFT", "GOOGL", "AMZN", "META"],
+                default=["AAPL", "MSFT"]
+            )
+            
+            if symbols:
+                data = process_market_data(api, symbols, months)
+                st.dataframe(data)
+                
+                # Plot historical data
+                for symbol in symbols:
+                    hist_data = api.get_historical_data(
+                        symbol,
+                        datetime.now() - timedelta(days=months*30)
+                    )
+                    if hist_data:
+                        df = pd.DataFrame(hist_data['candles'])
+                        st.line_chart(df.set_index('timestamp')['close'])
+        
+        with tab2:
+            positions = api.get_account_positions()
+            if positions:
+                st.dataframe(pd.DataFrame(positions['positions']))
+        
+        with tab3:
+            symbol = st.selectbox("Select Symbol for Options", symbols)
+            if symbol:
+                options = api.get_option_chain(symbol)
+                if options:
+                    st.dataframe(pd.DataFrame(options['options']))
+
+    except Exception as e:
+        st.error(f"Error initializing API: {str(e)}")
+        logger.error(f"Initialization error: {str(e)}")
 
 if __name__ == "__main__":
     main() 
