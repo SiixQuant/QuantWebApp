@@ -15,7 +15,13 @@ from oauthlib.oauth2 import BackendApplicationClient
 from requests_oauthlib import OAuth2Session
 import ssl
 import uuid
-ssl._create_default_https_context = ssl._create_unverified_context
+import logging
+import traceback
+from urllib.parse import quote
+
+# Set up logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 # Configure Streamlit page settings
 st.set_page_config(
@@ -41,26 +47,29 @@ SCHWAB_CONFIG = {
     'client_secret': 'NCiMvAdTarXnDcIq',
     'token_url': 'https://api.schwabapi.com/v1/oauth/token',
     'auth_url': 'https://api.schwabapi.com/v1/oauth/authorize',
-    'redirect_uri': 'https://quantwebapp-bjbqck9aebxpadmg6h7pmk.streamlit.app/',
+    'redirect_uri': quote('https://quantwebapp-bjbqck9aebxpadmg6h7pmk.streamlit.app/', safe=''),
     'api_base_url': 'https://api.schwabapi.com/v1/',
     'scope': ['readonly']
 }
 
 class SchwabAPI:
     def __init__(self):
-        self.session = OAuth2Session(
-            client_id=SCHWAB_CONFIG['client_id'],
-            redirect_uri=SCHWAB_CONFIG['redirect_uri'],
-            scope=SCHWAB_CONFIG['scope']
-        )
-        self.token = None
-        self.authenticate()
+        try:
+            self.session = OAuth2Session(
+                client_id=SCHWAB_CONFIG['client_id'],
+                redirect_uri=SCHWAB_CONFIG['redirect_uri'],
+                scope=SCHWAB_CONFIG['scope']
+            )
+            self.token = None
+            self.authenticate()
+        except Exception as e:
+            logger.error(f"Initialization error: {str(e)}\n{traceback.format_exc()}")
+            raise
     
     def authenticate(self):
         """Authenticate with Schwab API using authorization code flow"""
         try:
             if 'oauth_token' not in st.session_state:
-                # Format the authorization URL with required parameters
                 params = {
                     'response_type': 'code',
                     'client_id': SCHWAB_CONFIG['client_id'],
@@ -68,38 +77,25 @@ class SchwabAPI:
                     'redirect_uri': SCHWAB_CONFIG['redirect_uri']
                 }
                 
-                authorization_url = f"{SCHWAB_CONFIG['auth_url']}?" + '&'.join(f"{k}={v}" for k, v in params.items())
+                authorization_url = (f"{SCHWAB_CONFIG['auth_url']}?"
+                                  f"response_type=code&"
+                                  f"client_id={quote(params['client_id'])}&"
+                                  f"scope={quote(params['scope'])}&"
+                                  f"redirect_uri={quote(params['redirect_uri'])}")
                 
-                # Display authorization instructions
-                st.sidebar.markdown("### Authorization Required")
-                st.sidebar.markdown(f"Please authorize the app: [Click here]({authorization_url})")
-                
-                # Add input for authorization code
-                auth_code = st.sidebar.text_input("Enter authorization code:")
-                if auth_code:
-                    # Exchange authorization code for token
-                    token_data = {
-                        'grant_type': 'authorization_code',
-                        'code': auth_code,
-                        'redirect_uri': SCHWAB_CONFIG['redirect_uri'],
-                        'client_id': SCHWAB_CONFIG['client_id'],
-                        'client_secret': SCHWAB_CONFIG['client_secret']
-                    }
+                with st.sidebar:
+                    st.markdown("### Authorization Required")
+                    st.markdown(f"Please authorize the app: [Click here]({authorization_url})")
                     
-                    response = requests.post(
-                        SCHWAB_CONFIG['token_url'],
-                        data=token_data,
-                        headers={'Accept': 'application/json'}
+                    auth_code = st.text_input(
+                        "Enter authorization code:",
+                        key="auth_code_input_unique"
                     )
                     
-                    if response.status_code == 200:
-                        token = response.json()
-                        st.session_state['oauth_token'] = token
-                        self.token = token
-                        return True
-                    else:
-                        st.error(f"Token exchange failed: {response.text}")
-                        return False
+                    if auth_code:
+                        token_response = self.exchange_code_for_token(auth_code)
+                        if token_response:
+                            return True
             else:
                 self.token = st.session_state['oauth_token']
                 return True
@@ -107,8 +103,51 @@ class SchwabAPI:
             return False
             
         except Exception as e:
+            logger.error(f"Authentication error: {str(e)}\n{traceback.format_exc()}")
             st.error(f"Authentication failed: {str(e)}")
             return False
+
+    def exchange_code_for_token(self, auth_code):
+        """Exchange authorization code for token"""
+        try:
+            token_data = {
+                'grant_type': 'authorization_code',
+                'code': auth_code,
+                'redirect_uri': SCHWAB_CONFIG['redirect_uri'],
+                'client_id': SCHWAB_CONFIG['client_id'],
+                'client_secret': SCHWAB_CONFIG['client_secret']
+            }
+            
+            # Log token request (excluding sensitive data)
+            logger.debug(f"Requesting token with code length: {len(auth_code)}")
+            
+            response = requests.post(
+                SCHWAB_CONFIG['token_url'],
+                data=token_data,
+                headers={
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                },
+                verify=True  # Enable SSL verification
+            )
+            
+            # Log response status and content (safely)
+            logger.debug(f"Token response status: {response.status_code}")
+            
+            if response.status_code == 200:
+                token = response.json()
+                st.session_state['oauth_token'] = token
+                self.token = token
+                return token
+            else:
+                logger.error(f"Token exchange failed: {response.status_code} - {response.text}")
+                st.error(f"Token exchange failed: {response.text}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Token exchange error: {str(e)}\n{traceback.format_exc()}")
+            st.error(f"Token exchange failed: {str(e)}")
+            return None
 
     def get_market_data(self, symbol, interval='1d'):
         """Fetch market data from Schwab API"""
@@ -550,7 +589,7 @@ def main():
                             st.plotly_chart(fig2, use_container_width=True)
     
     # Add to sidebar
-    if st.sidebar.button("Logout"):
+    if st.sidebar.button("Logout", key="logout_button_unique"):
         if 'oauth_token' in st.session_state:
             del st.session_state['oauth_token']
         st.experimental_rerun()
