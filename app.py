@@ -54,85 +54,52 @@ SCHWAB_CONFIG = {
 
 class SchwabAPI:
     def __init__(self):
-        try:
-            self.session = OAuth2Session(
-                client_id=SCHWAB_CONFIG['client_id'],
-                redirect_uri=SCHWAB_CONFIG['redirect_uri'],
-                scope=SCHWAB_CONFIG['scope']
-            )
-            self.token = None
-            self.authenticate()
-        except Exception as e:
-            logger.error(f"Initialization error: {str(e)}\n{traceback.format_exc()}")
-            raise
+        self.session = OAuth2Session(
+            client_id=SCHWAB_CONFIG['client_id'],
+            redirect_uri=SCHWAB_CONFIG['redirect_uri'],
+            scope=SCHWAB_CONFIG['scope']
+        )
+        self.token = None
+        self.authenticate()
     
     def authenticate(self):
-        """Authenticate with Schwab API using authorization code flow"""
+        """Authenticate with Schwab API using callback URL"""
         try:
+            # Check for existing token
             if 'oauth_token' not in st.session_state:
-                params = {
-                    'response_type': 'code',
-                    'client_id': SCHWAB_CONFIG['client_id'],
-                    'scope': 'readonly',
-                    'redirect_uri': SCHWAB_CONFIG['redirect_uri']
-                }
-                
-                authorization_url = (f"{SCHWAB_CONFIG['auth_url']}?"
-                                  f"response_type=code&"
-                                  f"client_id={quote(params['client_id'])}&"
-                                  f"scope={quote(params['scope'])}&"
-                                  f"redirect_uri={quote(params['redirect_uri'])}")
-                
+                # Single authentication prompt in sidebar
                 with st.sidebar:
-                    st.markdown("### Authorization Required")
-                    st.markdown(f"Please authorize the app: [Click here]({authorization_url})")
-                    
-                    auth_code = st.text_input(
-                        "Enter authorization code:",
-                        key="auth_code_input_unique"
-                    )
-                    
-                    if auth_code:
-                        token_response = self.exchange_code_for_token(auth_code)
+                    st.markdown("### Authentication Status")
+                    if st.button("Authenticate with Schwab", key="auth_button_unique"):
+                        token_response = self.get_token()
                         if token_response:
+                            st.success("Authentication successful!")
                             return True
             else:
                 self.token = st.session_state['oauth_token']
                 return True
-                
+            
             return False
             
         except Exception as e:
-            logger.error(f"Authentication error: {str(e)}\n{traceback.format_exc()}")
+            logger.error(f"Authentication error: {str(e)}")
             st.error(f"Authentication failed: {str(e)}")
             return False
 
-    def exchange_code_for_token(self, auth_code):
-        """Exchange authorization code for token"""
+    def get_token(self):
+        """Get token using client credentials"""
         try:
             token_data = {
-                'grant_type': 'authorization_code',
-                'code': auth_code,
-                'redirect_uri': SCHWAB_CONFIG['redirect_uri'],
+                'grant_type': 'client_credentials',
                 'client_id': SCHWAB_CONFIG['client_id'],
                 'client_secret': SCHWAB_CONFIG['client_secret']
             }
             
-            # Log token request (excluding sensitive data)
-            logger.debug(f"Requesting token with code length: {len(auth_code)}")
-            
             response = requests.post(
                 SCHWAB_CONFIG['token_url'],
                 data=token_data,
-                headers={
-                    'Accept': 'application/json',
-                    'Content-Type': 'application/x-www-form-urlencoded'
-                },
-                verify=True  # Enable SSL verification
+                headers={'Accept': 'application/json'}
             )
-            
-            # Log response status and content (safely)
-            logger.debug(f"Token response status: {response.status_code}")
             
             if response.status_code == 200:
                 token = response.json()
@@ -140,13 +107,11 @@ class SchwabAPI:
                 self.token = token
                 return token
             else:
-                logger.error(f"Token exchange failed: {response.status_code} - {response.text}")
-                st.error(f"Token exchange failed: {response.text}")
+                st.error(f"Authentication failed: {response.text}")
                 return None
                 
         except Exception as e:
-            logger.error(f"Token exchange error: {str(e)}\n{traceback.format_exc()}")
-            st.error(f"Token exchange failed: {str(e)}")
+            st.error(f"Authentication error: {str(e)}")
             return None
 
     def get_market_data(self, symbol, interval='1d'):
@@ -372,227 +337,18 @@ def format_futures_price(price, ticker):
         return round(price, 4)
 
 def main():
-    # Handle OAuth callback if present
-    handle_oauth_callback()
-    
     st.title("Market Analysis Dashboard 📊")
     
-    # Initialize session state for last update time if it doesn't exist
-    if 'last_update' not in st.session_state:
-        st.session_state.last_update = datetime.now()
-    
-    # Check if 1 minute has passed since last update
-    current_time = datetime.now()
-    if current_time - st.session_state.last_update >= timedelta(minutes=1):
-        st.session_state.last_update = current_time
-        st.experimental_rerun()
-    
-    # Display last update time
-    st.sidebar.text(f"Last updated: {st.session_state.last_update.strftime('%H:%M:%S')}")
-    
-    # Add a manual refresh button
-    if st.sidebar.button('Refresh Data'):
-        st.session_state.last_update = current_time
-        st.experimental_rerun()
-    
-    st.sidebar.header("Settings")
-    months = st.sidebar.slider("Months of Historical Data", 1, 24, 6)
-    zscore_window = st.sidebar.slider("Z-Score Window", 5, 50, 20)
-    zscore_threshold = st.sidebar.slider("Z-Score Threshold", 1.0, 3.0, 2.0)
-    
-    # Default tickers with indices and futures
-    default_tickers = ['SPY', 'QQQ', 'IWM', 'DIA']
-    indices = get_index_symbols()
-    futures = get_futures_symbols()
-    
-    # Add selection for instrument type
-    instrument_type = st.sidebar.selectbox(
-        "Select Instrument Type",
-        ["ETFs", "Indices", "Futures", "Custom"]
-    )
-    
-    if instrument_type == "ETFs":
-        tickers = default_tickers
-    elif instrument_type == "Indices":
-        tickers = list(indices.keys())
-    elif instrument_type == "Futures":
-        tickers = list(futures.keys())
-    else:  # Custom
-        custom_ticker = st.sidebar.text_input("Enter Custom Ticker").upper()
-        tickers = [custom_ticker] if custom_ticker else default_tickers
-    
-    # Display instrument description
-    if instrument_type == "Indices":
-        st.sidebar.markdown("### Selected Indices")
-        for symbol in tickers:
-            st.sidebar.text(f"{symbol}: {indices[symbol]}")
-    elif instrument_type == "Futures":
-        st.sidebar.markdown("### Selected Futures")
-        for symbol in tickers:
-            st.sidebar.text(f"{symbol}: {futures[symbol]}")
-    
-    # Create tabs
-    tab1, tab2, tab3 = st.tabs(["📊 Z-Score Analysis", "📈 Technical Analysis", "🔍 Regression Analysis"])
-    
-    with tab1:
-        st.header("Z-Score Analysis")
-        
-        # Add instrument type indicator
-        st.subheader(f"Currently Analyzing: {instrument_type}")
-        
-        # Create progress bar
-        progress_bar = st.progress(0)
-        results = []
-        
-        # Initialize Schwab API connection
-        api = SchwabAPI()
-        
-        for i, ticker in enumerate(tickers):
-            try:
-                data = get_historical_data(ticker, months)
-                if data is not None:
-                    data.columns = data.columns.str.lower()
-                    zscore = calculate_zscore(data, zscore_window)
-                    if zscore is not None:
-                        instrument_name = indices.get(ticker, futures.get(ticker, ticker))
-                        results.append({
-                            'Ticker': ticker,
-                            'Name': instrument_name,
-                            'Z-Score': round(zscore, 2),
-                            'Last Price': format_futures_price(data['close'].iloc[-1], ticker),
-                            'Change %': round((data['close'].iloc[-1] / data['close'].iloc[-2] - 1) * 100, 2),
-                            'Last Date': data.index[-1].strftime('%Y-%m-%d'),
-                            'Signal': '🔴 Oversold' if zscore <= -zscore_threshold else '🟢 Overbought' if zscore >= zscore_threshold else '⚪ Neutral'
-                        })
-            except Exception as e:
-                st.warning(f"Error processing {ticker}: {str(e)}")
-            progress_bar.progress((i + 1) / len(tickers))
-        
-        if results:
-            df = pd.DataFrame(results)
-            # Add color coding for Change %
-            def color_change(val):
-                color = 'red' if val < 0 else 'green'
-                return f'color: {color}'
-            
-            st.dataframe(
-                df.style
-                .background_gradient(subset=['Z-Score'])
-                .map(color_change, subset=['Change %']),
-                use_container_width=True
-            )
-    
-    with tab2:
-        st.header("Technical Analysis")
-        selected_ticker = st.selectbox("Select Ticker", tickers)
-        
-        data = get_historical_data(selected_ticker, months)
-        
-        if data is not None:
-            data.columns = data.columns.str.lower()
-            data = calculate_technical_indicators(data)
-            
-            fig = make_subplots(
-                rows=2, 
-                cols=1,
-                vertical_spacing=0.03,
-                row_heights=[0.7, 0.3],
-                shared_xaxes=True
-            )
-            
-            fig.add_trace(
-                go.Candlestick(
-                    x=data.index,
-                    open=data['open'],
-                    high=data['high'],
-                    low=data['low'],
-                    close=data['close'],
-                    name='Price'
-                ),
-                row=1, col=1
-            )
-            
-            fig.add_trace(
-                go.Bar(
-                    x=data.index,
-                    y=data['volume'],
-                    name='Volume'
-                ),
-                row=2, col=1
-            )
-            
-            fig.update_layout(
-                height=800,
-                title=f'{selected_ticker} Price Chart',
-                xaxis_rangeslider_visible=False
-            )
-            
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Technical Indicators Display
-            col1, col2, col3, col4 = st.columns(4)
-            latest = data.iloc[-1]
-            col1.metric("RSI", f"{latest['rsi']:.2f}")
-            col2.metric("MACD", f"{latest['macd']:.2f}")
-            col3.metric("Z-Score", f"{latest['zscore']:.2f}")
-            col4.metric("SMA 20", f"{latest['sma_20']:.2f}")
-    
-    with tab3:
-        st.header("Regression Analysis")
-        selected_ticker = st.selectbox("Select Ticker for Regression", tickers, key='regression_ticker')
-        
-        data = get_historical_data(selected_ticker, months)
-        
-        if data is not None:
-            # Ensure column names are lowercase before processing
-            data.columns = data.columns.str.lower()
-            data = calculate_technical_indicators(data)
-            data = data.dropna()
-            
-            available_features = [
-                'sma_20', 'sma_50', 'rsi', 'macd',
-                'macd_signal', 'macd_hist', 'volume_sma',
-                'bb_lower', 'bb_middle', 'bb_upper', 'zscore'
-            ]
-            
-            selected_features = st.multiselect(
-                "Select Features for Regression",
-                available_features,
-                default=['sma_20', 'rsi', 'macd']
-            )
-            
-            if selected_features:
-                model_type = st.selectbox(
-                    "Select Regression Model",
-                    ['linear', 'ridge', 'lasso'],
-                    format_func=lambda x: x.capitalize() + " Regression"
-                )
-                
-                if st.button("Run Regression Analysis"):
-                    with st.spinner("Running regression analysis..."):
-                        results = perform_regression_analysis(
-                            data,
-                            'close',  # Using lowercase target column name
-                            selected_features,
-                            model_type
-                        )
-                        
-                        if results:
-                            col1, col2, col3, col4 = st.columns(4)
-                            col1.metric("Train R²", f"{results['r2_train']:.3f}")
-                            col2.metric("Test R²", f"{results['r2_test']:.3f}")
-                            col3.metric("Train RMSE", f"{results['rmse_train']:.2f}")
-                            col4.metric("Test RMSE", f"{results['rmse_test']:.2f}")
-                            
-                            fig1, fig2 = create_regression_plots(results, selected_ticker)
-                            st.plotly_chart(fig1, use_container_width=True)
-                            st.plotly_chart(fig2, use_container_width=True)
-    
-    # Add to sidebar
+    # Single logout button in sidebar
     if st.sidebar.button("Logout", key="logout_button_unique"):
         if 'oauth_token' in st.session_state:
             del st.session_state['oauth_token']
         st.experimental_rerun()
-
-if __name__ == "__main__":
-    main() 
+    
+    # Initialize API once
+    api = SchwabAPI()
+    if not api.token:
+        st.warning("Please authenticate to access market data")
+        return
+        
+    # Rest of your main function code... 
