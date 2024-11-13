@@ -1,5 +1,4 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -11,6 +10,12 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import r2_score, mean_squared_error
 import time
+import requests
+from oauthlib.oauth2 import BackendApplicationClient
+from requests_oauthlib import OAuth2Session
+import ssl
+import uuid
+ssl._create_default_https_context = ssl._create_unverified_context
 
 # Configure Streamlit page settings
 st.set_page_config(
@@ -29,6 +34,139 @@ footer {visibility: hidden;}
 </style>
 """
 st.markdown(hide_streamlit_style, unsafe_allow_html=True)
+
+# Update the SCHWAB_CONFIG with your exact details
+SCHWAB_CONFIG = {
+    'client_id': 'f6MOF1oqGHpQC6sZPCvTPRe7nyMWDgof',
+    'client_secret': 'NCiMvAdTarXnDcIq',
+    'token_url': 'https://api.schwabapi.com/v1/oauth/token',
+    'auth_url': 'https://api.schwabapi.com/v1/oauth/authorize',
+    'redirect_uri': 'https://quantwebapp-bjbqck9aebxpadmg6h7pmk.streamlit.app/',
+    'api_base_url': 'https://api.schwabapi.com/v1/',
+    'scope': ['readonly']
+}
+
+class SchwabAPI:
+    def __init__(self):
+        self.session = OAuth2Session(
+            client_id=SCHWAB_CONFIG['client_id'],
+            redirect_uri=SCHWAB_CONFIG['redirect_uri'],
+            scope=SCHWAB_CONFIG['scope']
+        )
+        self.token = None
+        self.authenticate()
+    
+    def authenticate(self):
+        """Authenticate with Schwab API using authorization code flow"""
+        try:
+            if 'oauth_token' not in st.session_state:
+                # Format the authorization URL with required parameters
+                params = {
+                    'response_type': 'code',
+                    'client_id': SCHWAB_CONFIG['client_id'],
+                    'scope': 'readonly',
+                    'redirect_uri': SCHWAB_CONFIG['redirect_uri']
+                }
+                
+                authorization_url = f"{SCHWAB_CONFIG['auth_url']}?" + '&'.join(f"{k}={v}" for k, v in params.items())
+                
+                # Display authorization instructions
+                st.sidebar.markdown("### Authorization Required")
+                st.sidebar.markdown(f"Please authorize the app: [Click here]({authorization_url})")
+                
+                # Add input for authorization code
+                auth_code = st.sidebar.text_input("Enter authorization code:")
+                if auth_code:
+                    # Exchange authorization code for token
+                    token_data = {
+                        'grant_type': 'authorization_code',
+                        'code': auth_code,
+                        'redirect_uri': SCHWAB_CONFIG['redirect_uri'],
+                        'client_id': SCHWAB_CONFIG['client_id'],
+                        'client_secret': SCHWAB_CONFIG['client_secret']
+                    }
+                    
+                    response = requests.post(
+                        SCHWAB_CONFIG['token_url'],
+                        data=token_data,
+                        headers={'Accept': 'application/json'}
+                    )
+                    
+                    if response.status_code == 200:
+                        token = response.json()
+                        st.session_state['oauth_token'] = token
+                        self.token = token
+                        return True
+                    else:
+                        st.error(f"Token exchange failed: {response.text}")
+                        return False
+            else:
+                self.token = st.session_state['oauth_token']
+                return True
+                
+            return False
+            
+        except Exception as e:
+            st.error(f"Authentication failed: {str(e)}")
+            return False
+
+    def get_market_data(self, symbol, interval='1d'):
+        """Fetch market data from Schwab API"""
+        if not self.token:
+            return None
+            
+        headers = {
+            'Authorization': f"Bearer {self.token.get('access_token')}",
+            'Accept': 'application/json',
+            'SchwabClientCustomerId': 'Someone',  # Add based on your requirements
+            'SchwabClientCorrelId': str(uuid.uuid4())  # Generate unique ID for each request
+        }
+        
+        # Format request based on Schwab API requirements
+        request_data = {
+            "requestid": "0",
+            "service": "LEVELONE_EQUITIES",
+            "command": "SUBS",
+            "parameters": {
+                "keys": symbol,
+                "fields": "0,1,2,3,4,5,6,7,8,9"  # Adjust fields based on your needs
+            }
+        }
+        
+        try:
+            endpoint = f"{SCHWAB_CONFIG['api_base_url']}markets/quotes/{symbol}"
+            response = self.session.post(endpoint, headers=headers, json=request_data)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            st.error(f"Failed to fetch market data: {str(e)}")
+            if getattr(response, 'status_code', None) == 401:
+                if 'oauth_token' in st.session_state:
+                    del st.session_state['oauth_token']
+            return None
+
+# Add a function to handle the OAuth callback
+def handle_oauth_callback():
+    if 'code' in st.experimental_get_query_params():
+        auth_code = st.experimental_get_query_params()['code'][0]
+        api = SchwabAPI()
+        if api.authenticate():
+            st.success("Successfully authenticated!")
+            st.experimental_rerun()
+
+# Modify the data fetching functions to use Schwab API instead of yfinance
+def get_historical_data(ticker, months):
+    """Get historical data using Schwab API"""
+    api = SchwabAPI()
+    data = api.get_market_data(ticker)
+    
+    if data:
+        # Transform Schwab API response to match the expected DataFrame format
+        df = pd.DataFrame(data['quotes'])
+        df.set_index('timestamp', inplace=True)
+        df.index = pd.to_datetime(df.index)
+        return df
+    return None
 
 def calculate_zscore(data, window=20):
     """Calculate Z-score for a given dataset"""
@@ -195,6 +333,9 @@ def format_futures_price(price, ticker):
         return round(price, 4)
 
 def main():
+    # Handle OAuth callback if present
+    handle_oauth_callback()
+    
     st.title("Market Analysis Dashboard 📊")
     
     # Initialize session state for last update time if it doesn't exist
@@ -264,13 +405,13 @@ def main():
         progress_bar = st.progress(0)
         results = []
         
+        # Initialize Schwab API connection
+        api = SchwabAPI()
+        
         for i, ticker in enumerate(tickers):
             try:
-                data = yf.download(ticker, 
-                                 start=datetime.now() - timedelta(days=30*months),
-                                 end=datetime.now(),
-                                 progress=False)
-                if not data.empty:
+                data = get_historical_data(ticker, months)
+                if data is not None:
                     data.columns = data.columns.str.lower()
                     zscore = calculate_zscore(data, zscore_window)
                     if zscore is not None:
@@ -306,11 +447,9 @@ def main():
         st.header("Technical Analysis")
         selected_ticker = st.selectbox("Select Ticker", tickers)
         
-        data = yf.download(selected_ticker, 
-                          start=datetime.now() - timedelta(days=30*months),
-                          end=datetime.now())
+        data = get_historical_data(selected_ticker, months)
         
-        if not data.empty:
+        if data is not None:
             data.columns = data.columns.str.lower()
             data = calculate_technical_indicators(data)
             
@@ -363,11 +502,9 @@ def main():
         st.header("Regression Analysis")
         selected_ticker = st.selectbox("Select Ticker for Regression", tickers, key='regression_ticker')
         
-        data = yf.download(selected_ticker, 
-                          start=datetime.now() - timedelta(days=30*months),
-                          end=datetime.now())
+        data = get_historical_data(selected_ticker, months)
         
-        if not data.empty:
+        if data is not None:
             # Ensure column names are lowercase before processing
             data.columns = data.columns.str.lower()
             data = calculate_technical_indicators(data)
@@ -411,6 +548,12 @@ def main():
                             fig1, fig2 = create_regression_plots(results, selected_ticker)
                             st.plotly_chart(fig1, use_container_width=True)
                             st.plotly_chart(fig2, use_container_width=True)
+    
+    # Add to sidebar
+    if st.sidebar.button("Logout"):
+        if 'oauth_token' in st.session_state:
+            del st.session_state['oauth_token']
+        st.experimental_rerun()
 
 if __name__ == "__main__":
     main() 
