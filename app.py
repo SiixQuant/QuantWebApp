@@ -12,14 +12,13 @@ logger = logging.getLogger(__name__)
 # Update configuration with IP address instead of domain
 SCHWAB_CONFIG = {
     'client_id': 'f6MOF1oqGHpQC6sZPCvTPRe7nyMWDgof',
-    'client_secret': 'NCiMvAdTarXnDcIq',
-    # Use HTTPS with IP address
-    'base_url': 'https://198.87.123.45/v1',  # Replace with actual Schwab API IP
-    'token_url': 'https://198.87.123.45/v1/oauth/token',
-    'auth_url': 'https://198.87.123.45/v1/oauth/authorize',
+    'client_secret': 'NCiMvAdTarXnDcJq',
+    'base_url': 'https://api.schwabapi.com/v1',
+    'token_url': 'https://api.schwabapi.com/v1/oauth/token',
+    'auth_url': 'https://api.schwabapi.com/v1/oauth/authorize',
     'redirect_uri': 'https://quantwebapp-bjbqck9aebxpadmg6h7pmk.streamlit.app/',
-    'scope': ['trading', 'quotes', 'accounts', 'margin'],
-    'host_header': 'api.schwabapi.com'  # Original host for header
+    'scope': ['readonly'],
+    'host_header': 'api.schwabapi.com'
 }
 
 class SchwabAPI:
@@ -41,6 +40,7 @@ class SchwabAPI:
         
         self.token = None
         self.authenticate()
+        self.request_id = 0  # To track unique request IDs
 
     def authenticate(self):
         """Authenticate with Schwab API"""
@@ -89,20 +89,30 @@ class SchwabAPI:
     def get_quotes(self, symbols):
         """Get quotes for a list of symbols"""
         try:
+            self.request_id += 1
+            
+            # Format request according to documentation
+            request_data = {
+                "service": "LEVELONE_EQUITY",
+                "command": "SUBS",
+                "requestid": str(self.request_id),
+                "parameters": {
+                    "symbols": symbols if isinstance(symbols, str) else ','.join(symbols),
+                    "fields": "0,1,2,3,4,5"  # Basic quote fields
+                }
+            }
+            
             headers = {
                 'Accept': 'application/json',
                 'Authorization': f'Bearer {self.token["access_token"]}',
                 'Host': SCHWAB_CONFIG['host_header']
             }
             
-            # Convert symbols list to comma-separated string if needed
-            if isinstance(symbols, list):
-                symbols = ','.join(symbols)
+            url = f"{SCHWAB_CONFIG['base_url']}/stream"  # Adjust endpoint as needed
             
-            url = f"{SCHWAB_CONFIG['base_url']}/quotes?symbols={symbols}"
-            
-            response = self.session.get(
+            response = self.session.post(
                 url,
+                json=request_data,
                 headers=headers,
                 proxies=self.proxies,
                 timeout=30,
