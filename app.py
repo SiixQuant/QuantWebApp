@@ -4,6 +4,7 @@ import socket
 from requests_oauthlib import OAuth2Session 
 import logging
 import urllib3
+import base64
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -13,10 +14,10 @@ logger = logging.getLogger(__name__)
 SCHWAB_CONFIG = {
     'client_id': 'f6MOF1oqGHpQC6sZPCvTPRe7nyMWDgof',
     'client_secret': 'NCiMvAdTarXnDcJq',
-    'base_url': 'https://api.schwabapi.com/v1',
+    'base_url': 'https://api.schwabapi.com/marketdata/v1',
     'token_url': 'https://api.schwabapi.com/v1/oauth/token',
     'auth_url': 'https://api.schwabapi.com/v1/oauth/authorize',
-    'redirect_uri': 'https://quantwebapp-bjbqck9aebxpadmg6h7pmk.streamlit.app/',
+    'redirect_uri': 'https://developer.schwab.com/oauth2-redirect.html',
     'scope': ['readonly'],
     'host_header': 'api.schwabapi.com'
 }
@@ -45,29 +46,32 @@ class SchwabAPI:
     def authenticate(self):
         """Authenticate with Schwab API"""
         try:
+            # Create credentials string and encode it
+            credentials = f"{SCHWAB_CONFIG['client_id']}:{SCHWAB_CONFIG['client_secret']}"
+            encoded_credentials = base64.b64encode(credentials.encode()).decode()
+
             headers = {
                 'Accept': 'application/json',
                 'Content-Type': 'application/x-www-form-urlencoded',
-                'Host': SCHWAB_CONFIG['host_header'],  # Add host header
-                'Connection': 'keep-alive'
+                'Authorization': f'Basic {encoded_credentials}',
+                'Host': SCHWAB_CONFIG['host_header'],
+                'Connection': 'keep-alive'  # Added as per Schwab docs
             }
             
             data = {
                 'grant_type': 'client_credentials',
-                'client_id': SCHWAB_CONFIG['client_id'],
-                'client_secret': SCHWAB_CONFIG['client_secret']
+                'scope': 'trade'  # Changed to 'trade' as per Trader API requirements
             }
             
-            logger.debug(f"Attempting authentication to: {SCHWAB_CONFIG['token_url']}")
+            logger.debug("Attempting authentication with Trader API")
             
-            # Make request with custom headers and proxy support
             response = self.session.post(
                 SCHWAB_CONFIG['token_url'],
                 headers=headers,
                 data=data,
                 proxies=self.proxies,
                 timeout=30,
-                verify=False  # Temporarily disable SSL verification
+                verify=True  # Changed to True for production API
             )
             
             logger.debug(f"Authentication response status: {response.status_code}")
